@@ -1,0 +1,55 @@
+name: Configure deployed infrastructure
+
+on:
+  workflow_dispatch:
+
+env:
+  ANS_DIR: ./ansible
+
+jobs:
+  configure:
+    runs-on: actions-runner
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    defaults:
+      run:
+        working-directory: ${{ env.ANS_DIR }}
+
+    steps:
+      - name: Checkout 
+        uses: actions/checkout@v4
+
+      - name: Auth to GCP
+        uses: 'google-github-actions/auth@v2'
+        with:
+          project_id: ${{ secrets.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.WIF_URL }}
+          service_account: ${{ secrets.TF_SA }}
+          create_credentials_file: true
+          token_format: access_token
+          access_token_lifetime: "360s"
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: List VMs
+        run: |
+          echo "[webservers]" > hosts.ini
+          gcloud compute instances list --filter="labels.type=webserver" --format="json(name, networkInterfaces[0].networkIP)" | \
+          jq -r '.[] | "\(.networkInterfaces[0].networkIP)"' >> hosts.ini
+
+          cat hosts.ini
+
+      - name: Setup Ansible
+        run: |
+          sudo apt update
+          sudo apt install ansible -y 
+
+      - name: Run playbook
+        run: |
+          echo '${{ secrets.ANSIBLE_PRIV_KEY }}' > ssh_rsa
+          chmod 600 ssh_rsa
+          ansible-playbook --verbose --private-key ./ssh_rsa setup.yml -i hosts.ini

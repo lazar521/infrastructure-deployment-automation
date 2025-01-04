@@ -1,0 +1,102 @@
+name: Infrastructure as code
+
+on:
+  workflow_dispatch:
+    inputs:
+      tf_operation:
+        required: false
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+      infra_env:
+        description: Terraform directory
+        required: false
+        type: choice
+        options:
+          - dev
+          - core
+
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+    paths:
+      - dev/**
+      - core/**
+      - .github/workflows/iac.yml
+      - modules/**
+
+env:
+  TF_OPR: ${{ inputs.tf_operation || 'plan' }}
+  TF_WDIR: ./${{ inputs.infra_env || 'dev' }}
+  ANSIBLE_USER: ansible
+
+jobs:
+  deploy_infra:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WDIR }}
+
+    steps:
+      - name: Checkout 
+        uses: actions/checkout@v4
+
+      - name: Setup terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.1.7"
+
+      - name: Run terraform lint
+        continue-on-error: true
+        run: |
+          terraform fmt -recursive -check
+
+      - name: Auth to GCP
+        uses: 'google-github-actions/auth@v2'
+        with:
+          project_id: ${{ secrets.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.WIF_URL }}
+          service_account: ${{ secrets.TF_SA }}
+          create_credentials_file: true
+          token_format: access_token
+          access_token_lifetime: "360s"
+
+      - name: Initialize terraform
+        run: |
+          terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+          terraform get
+      
+      - name: Provide variables
+        run: |
+          cat <<EOF > additional.tfvars
+          vm_public_key="${{ env.ANSIBLE_USER }}:${{ secrets.ANSIBLE_PUB_KEY }}"
+          db_pass="${{ secrets.DB_PASSWORD }}"
+          gcp_project="${{ secrets.PROJECT_ID }}"
+          vm_service_account="${{ secrets.TF_VM_SERVICE_ACCOUNT }}"
+          EOF
+
+      - name: Terraform Plan
+        if: ${{ env.TF_OPR == 'plan' }}
+        run: |
+          terraform plan -compact-warnings -var-file=additional.tfvars
+
+      - name: Terraform Apply
+        if: ${{ env.TF_OPR == 'apply' }}
+        run: |
+          terraform apply -auto-approve -compact-warnings -var-file=additional.tfvars
+
+      - name: Terraform Destroy
+        if: ${{ env.TF_OPR == 'destroy' }}
+        run: |
+          terraform destroy -auto-approve -compact-warnings -var-file=additional.tfvars
+
+
+
